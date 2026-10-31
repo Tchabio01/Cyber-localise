@@ -11,6 +11,20 @@ create table if not exists public.profiles (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+create or replace function private.create_profile_for_new_user()
+returns trigger language plpgsql security definer set search_path = ''
+as $
+begin
+  insert into public.profiles(user_id,display_name)
+  values (new.id, coalesce(new.raw_user_meta_data->>'display_name',''))
+  on conflict (user_id) do nothing;
+  return new;
+end;
+$;
+drop trigger if exists on_auth_user_created_profile on auth.users;
+create trigger on_auth_user_created_profile after insert on auth.users
+for each row execute function private.create_profile_for_new_user();
+
 create table if not exists public.organizations (
   id uuid primary key default gen_random_uuid(),
   name text not null check (char_length(name) between 2 and 100),
@@ -111,8 +125,8 @@ create policy organizations_insert_self on public.organizations for insert to au
 with check (created_by = (select auth.uid()));
 drop policy if exists organizations_update_admin on public.organizations;
 create policy organizations_update_admin on public.organizations for update to authenticated
-using (private.has_org_role(id,array['owner','admin']))
-with check (private.has_org_role(id,array['owner','admin']));
+using (private.has_org_role(id,array['owner','admin']) or (auth.jwt()->'app_metadata'->>'platform_role') = 'admin')
+with check (private.has_org_role(id,array['owner','admin']) or (auth.jwt()->'app_metadata'->>'platform_role') = 'admin');
 drop policy if exists organizations_delete_owner on public.organizations;
 create policy organizations_delete_owner on public.organizations for delete to authenticated
 using (private.has_org_role(id,array['owner']));
@@ -122,14 +136,14 @@ create policy members_select_same_org on public.organization_members for select 
 using (user_id = (select auth.uid()) or private.has_org_role(organization_id,array['owner','admin']) or (auth.jwt()->'app_metadata'->>'platform_role') = 'admin');
 drop policy if exists members_insert_admin on public.organization_members;
 create policy members_insert_admin on public.organization_members for insert to authenticated
-with check (private.has_org_role(organization_id,array['owner','admin']) and role in ('analyst','member'));
+with check ((private.has_org_role(organization_id,array['owner','admin']) or (auth.jwt()->'app_metadata'->>'platform_role') = 'admin') and role in ('analyst','member'));
 drop policy if exists members_delete_admin on public.organization_members;
 create policy members_delete_admin on public.organization_members for delete to authenticated
-using (private.has_org_role(organization_id,array['owner','admin']) and role <> 'owner');
+using ((private.has_org_role(organization_id,array['owner','admin']) or (auth.jwt()->'app_metadata'->>'platform_role') = 'admin') and role <> 'owner');
 
 drop policy if exists cloud_threats_select_member on public.cloud_threat_observations;
 create policy cloud_threats_select_member on public.cloud_threat_observations for select to authenticated
-using (private.is_org_member(organization_id));
+using (private.is_org_member(organization_id) or (auth.jwt()->'app_metadata'->>'platform_role') = 'admin');
 drop policy if exists cloud_threats_insert_member on public.cloud_threat_observations;
 create policy cloud_threats_insert_member on public.cloud_threat_observations for insert to authenticated
 with check (private.is_org_member(organization_id) and reported_by = (select auth.uid()));
