@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CyberWatch Africa PRO 6.0 — defensive threat-intelligence dashboard for Termux."""
+"""CyberWatch Africa PRO 7.0 — defensive threat-intelligence dashboard for Termux."""
 from __future__ import annotations
 import csv, ipaddress, json, os, queue, socket, sqlite3, threading, time, urllib.request
 from collections import Counter
@@ -21,7 +21,7 @@ ENABLE_HONEYPOT = os.getenv("CW_HONEYPOT", "0") == "1"
 HONEYPOT_PORT = int(os.getenv("CW_HONEYPOT_PORT", "2222"))
 TG_TOKEN, TG_CHAT = os.getenv("TG_TOKEN"), os.getenv("TG_CHAT")
 MAX_GEO_PER_CYCLE = 90
-USER_AGENT = "CyberWatch-Africa-PRO/6.0 (defensive threat intelligence)"
+USER_AGENT = "CyberWatch-Africa-PRO/7.0 (defensive threat intelligence)"
 SOURCES = [
     ("Feodo Tracker", "https://feodotracker.abuse.ch/downloads/ipblocklist.json", "feodo"),
     ("Blocklist.de", "https://lists.blocklist.de/lists/all.txt", "bruteforce"),
@@ -374,7 +374,7 @@ def report_html():
     ev = "".join(f"<tr><td>{html_escape(e['ts'])}</td><td>{html_escape(e['severity'])}</td><td>{html_escape(e['title'])}</td><td>{html_escape(e['ip'] or '')}</td></tr>" for e in d["events"][:50])
     return ("<!doctype html><html lang='fr'><meta charset='utf-8'><title>Rapport CyberWatch</title>"
       "<style>body{font:14px Arial;margin:35px;color:#18202b}h1{color:#075e59}table{border-collapse:collapse;width:100%;margin:15px 0}td,th{border:1px solid #bbb;padding:7px;text-align:left}button{padding:10px}@media print{button{display:none}}</style>"
-      f"<h1>CyberWatch Africa PRO 6.0 — Rapport</h1><p>Généré le {html_escape(now_utc())} (UTC). Données indicatives issues de flux publics.</p>"
+      f"<h1>CyberWatch Africa PRO 7.0 — Rapport</h1><p>Généré le {html_escape(now_utc())} (UTC). Données indicatives issues de flux publics.</p>"
       f"<p>IP distinctes (48 h) : <b>{st['total']}</b> — IP géolocalisées en Afrique : <b>{st['africa']}</b> — Incidents (24 h) : <b>{st['events_24h']}</b></p>"
       f"<h2>Pays africains les plus représentés</h2><table><tr><th>Pays</th><th>IP</th></tr>{rows}</table>"
       f"<h2>Journal récent</h2><table><tr><th>Date UTC</th><th>Gravité</th><th>Événement</th><th>IP</th></tr>{ev}</table>"
