@@ -410,6 +410,11 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, (ROOT/"static"/"app.js").read_bytes(), "application/javascript; charset=utf-8")
         elif path == "/style.css":
             self.reply(200, (ROOT/"static"/"style.css").read_bytes(), "text/css; charset=utf-8")
+        elif path == "/config.js":
+            config = {"url": os.getenv("CW_SUPABASE_URL", ""),
+                      "publishableKey": os.getenv("CW_SUPABASE_PUBLISHABLE_KEY", "")}
+            body = ("window.CW_SUPABASE_CONFIG = " + json.dumps(config) + ";").encode()
+            self.reply(200, body, "application/javascript; charset=utf-8")
         elif path == "/api/data":
             self.reply(200, json.dumps(json_payload()).encode())
         elif path == "/api/events":
@@ -445,11 +450,11 @@ def main():
     init_db()
     load_geo_cache()
     threading.Thread(target=background_loop, daemon=True).start()
-    print("\\n CYBERWATCH AFRICA PRO 6.0")
+    print("\\n CYBERWATCH AFRICA PRO 7.0")
     print(f" Tableau : http://127.0.0.1:{PORT}")
     print(f" Base : {DB_PATH}")
     print(f" Cycle : {REFRESH}s | Honeypot : {'ACTIF' if ENABLE_HONEYPOT else 'désactivé'}")
-    print(" Version : 6.0 | Cybermap Afrique + arcs visuels explicitement illustratifs")
+    print(" Version : 7.0 | SOC multi-utilisateurs prêt pour cloud")
     if ENABLE_HONEYPOT:
         threading.Thread(target=honeypot_server, daemon=True).start()
     try:
