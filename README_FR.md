@@ -1,10 +1,10 @@
-# CyberWatch Africa PRO 6.0 — Termux / Android
+# CyberWatch Africa PRO 7.0 — Termux / Android
 
 Plateforme locale de veille défensive et d'apprentissage SOC. Interface sombre cyberpunk, carte Afrique & monde, collecte de flux publics, investigation IP, découverte limitée du réseau privé, diagnostic Android, journal SQLite et exports.
 
 ## Nouveautés 5.0
 - Cybermap continentale : affichage des IP géolocalisées, filtre Afrique / catégorie / recherche.
-- Tracés cyan lumineux sur la carte. **Important : ce sont des arcs graphiques illustratifs** reliant un point géolocalisé à une ville africaine. Les flux publics ne fournissent pas une destination d'attaque ; ces arcs ne constituent donc jamais une preuve de ciblage ou d'attaque.
+- Carte alimentée par des IP réellement présentes dans les flux publics collectés. Aucune route d'attaque fictive n'est dessinée.
 - Tableau de bord SOC, état des sources, statistiques, top pays, historique et événements.
 - Investigation d'IP publique, DNS inverse et correspondances avec les flux.
 - Découverte LAN limitée au sous-réseau privé /24 détecté et ports TCP 22, 80, 443.
@@ -67,10 +67,28 @@ Le scan LAN est volontairement limité au réseau privé local. N'utilise les fo
 - Phishing Watch : analyse heuristique locale de l'URL, sans visiter le lien ni certifier sa sûreté.
 - Protection Center : checklist et score pédagogique conservés dans le navigateur.
 - Cyber Academy : missions, XP, badges et niveaux enregistrés localement.
-- SOC Simulator : scénario fictif sans trafic réseau, séparé des événements réels.
 - Alert Center : seuils de notifications configurables dans le navigateur.
 - Africa Risk Index : classement du volume d'IP observées par pays, pas un indice de dangerosité nationale.
 - Threat Timeline : chronologie des événements collectés.
 - Langues : français, anglais, portugais et arabe (traduction partielle des titres).
 - Export Intelligence : CSV, JSON et rapport imprimable déjà présents.
 Les scores sont indicatifs. Ces modules ne remplacent ni un antivirus ni un SOC professionnel.
+
+## CyberWatch Africa PRO 7.0 — plateforme multi-utilisateurs
+- Authentification Supabase : inscription, connexion, déconnexion et profil.
+- Organisations et équipes avec rôles owner, admin, analyst, member.
+- Synchronisation cloud des observations locales réelles et événements, attribués au compte utilisateur.
+- Console administrateur réservée au rôle défini dans les métadonnées sécurisées app_metadata.
+- Politiques PostgreSQL Row Level Security (RLS) pour isoler les données par organisation.
+- Aucun SOC Simulator, aucun faux incident et aucune donnée fictive.
+- Les cartes affichent les localisations approximatives des IP observées ; elles ne fabriquent pas de destinations ou chemins d'attaque.
+
+### Configuration Supabase
+1. Appliquer supabase/schema.sql au projet Supabase choisi.
+2. Définir CW_SUPABASE_URL et CW_SUPABASE_PUBLISHABLE_KEY sur le serveur. Ne jamais exposer une clé service_role.
+3. Redémarrer CyberWatch et créer un compte puis une organisation.
+4. Pour attribuer l'administration globale, définir app_metadata.platform_role=admin par un canal d'administration Supabase. Ne jamais utiliser user_metadata pour les autorisations.
+
+**Sécurité importante :** ne publie pas directement le serveur Python actuel sur Internet. Ses API locales ne valident pas encore les JWT côté serveur et n'intègrent pas de reverse proxy HTTPS. Pour un déploiement public, il faudra terminer cette couche, activer HTTPS et configurer les règles réseau. La synchronisation cloud utilise RLS, mais cela ne protège pas à lui seul les routes locales.
+
+Les observations synchronisées sont des contributions rapportées par un membre et ne sont pas automatiquement certifiées. Leur source et leur date restent visibles.
