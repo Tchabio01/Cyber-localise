@@ -154,7 +154,7 @@ with check (private.is_org_member(organization_id) and reported_by = (select aut
 
 drop policy if exists cloud_events_select_member on public.cloud_incident_events;
 create policy cloud_events_select_member on public.cloud_incident_events for select to authenticated
-using (private.is_org_member(organization_id));
+using (private.is_org_member(organization_id) or (auth.jwt()->'app_metadata'->>'platform_role') = 'admin');
 drop policy if exists cloud_events_insert_member on public.cloud_incident_events;
 create policy cloud_events_insert_member on public.cloud_incident_events for insert to authenticated
 with check (private.is_org_member(organization_id) and reported_by = (select auth.uid()));
