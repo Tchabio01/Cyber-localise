@@ -2,7 +2,7 @@
 
 Plateforme locale de veille défensive et d'apprentissage SOC. Interface sombre cyberpunk, carte Afrique & monde, collecte de flux publics, investigation IP, découverte limitée du réseau privé, diagnostic Android, journal SQLite et exports.
 
-## Nouveautés 5.0
+## Fonctionnalités SOC de base
 - Cybermap continentale : affichage des IP géolocalisées, filtre Afrique / catégorie / recherche.
 - Carte alimentée par des IP réellement présentes dans les flux publics collectés. Aucune route d'attaque fictive n'est dessinée.
 - Tableau de bord SOC, état des sources, statistiques, top pays, historique et événements.
@@ -76,7 +76,7 @@ Le scan LAN est volontairement limité au réseau privé local. N'utilise les fo
 - Carte vide : la carte et la géolocalisation nécessitent Internet ; les flux peuvent ne contenir aucune IP africaine pendant un cycle.
 - Pour réinitialiser les données, arrête l'application puis supprime le fichier `~/cyberwatch_africa_v5.db` (cela efface l'historique).
 
-## Modules CyberWatch 6.0
+## Modules complémentaires
 - CyberAI local : synthèse descriptive des statistiques et conseils prédéfinis, sans prétendre être une IA distante.
 - Phishing Watch : analyse heuristique locale de l'URL, sans visiter le lien ni certifier sa sûreté.
 - Protection Center : checklist et score pédagogique conservés dans le navigateur.
