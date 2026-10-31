@@ -174,6 +174,6 @@ grant select, insert, delete on public.organization_members to authenticated;
 revoke all on public.cloud_threat_observations from anon, authenticated;
 grant select on public.cloud_threat_observations to authenticated;
 grant insert (organization_id,ip,source,kind,label,country,country_code,city,lat,lon,first_seen,last_seen,reported_by,origin) on public.cloud_threat_observations to authenticated;
-grant update (kind,label,country,country_code,city,lat,lon,first_seen,last_seen,origin) on public.cloud_threat_observations to authenticated;
+grant update (organization_id,ip,source,reported_by,kind,label,country,country_code,city,lat,lon,first_seen,last_seen,origin) on public.cloud_threat_observations to authenticated;
 grant select, insert, update on public.cloud_incident_events to authenticated;
 grant select, insert, update on public.user_preferences to authenticated;
