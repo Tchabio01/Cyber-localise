@@ -37,8 +37,8 @@ async function syncCloud(){
  const threats=(d.points||[]).map(p=>({organization_id:activeOrg,ip:p.ip,source:p.src,kind:p.kind,label:p.label,country:p.country,country_code:p.cc,city:p.city,lat:p.lat,lon:p.lon,first_seen:p.first_seen,last_seen:p.last_seen,reported_by:user.id,origin:'local_collector'}));
  const events=(d.events||[]).map(e=>({organization_id:activeOrg,local_event_id:String(e.id),ts:e.ts,severity:e.severity,category:e.category,title:e.title,detail:e.detail,ip:e.ip||null,reported_by:user.id}));
  let tCount=0,eCount=0;
- if(threats.length){const {error}=await client.from('cloud_threat_observations').upsert(threats,{onConflict:'organization_id,ip,source'});if(error)throw error;tCount=threats.length;}
- if(events.length){const {error}=await client.from('cloud_incident_events').upsert(events,{onConflict:'organization_id,local_event_id'});if(error)throw error;eCount=events.length;}
+ if(threats.length){const {error}=await client.from('cloud_threat_observations').upsert(threats,{onConflict:'organization_id,ip,source,reported_by'});if(error)throw error;tCount=threats.length;}
+ if(events.length){const {error}=await client.from('cloud_incident_events').upsert(events,{onConflict:'organization_id,local_event_id,reported_by'});if(error)throw error;eCount=events.length;}
  box.textContent='Synchronisation terminée : '+tCount+' observations et '+eCount+' événements envoyés. Contributions déclarées par un membre, non certifiées automatiquement.';
  await loadAdmin();
 }
