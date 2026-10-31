@@ -16,7 +16,7 @@ Plateforme locale de veille défensive et d'apprentissage SOC. Interface sombre 
 1. Extrais le ZIP dans le stockage du téléphone.
 2. Dans Termux, place-toi dans le dossier extrait, par exemple :
    ```bash
-   cd ~/storage/downloads/CyberWatch_Africa_PRO_5
+   cd ~/storage/downloads/Cyber-localise
    ```
 3. Exécute :
    ```bash
@@ -26,6 +26,20 @@ Plateforme locale de veille défensive et d'apprentissage SOC. Interface sombre 
    ```
 4. Ouvre dans Chrome : `http://127.0.0.1:8080`.
 5. Arrête le serveur avec `CTRL+C` dans Termux.
+
+
+### Activer le compte cloud dans Termux
+Après avoir choisi et configuré le projet Supabase :
+```bash
+cd ~/storage/downloads/Cyber-localise
+cp .env.example .env
+nano .env
+```
+Remplace les deux valeurs par l’URL et la clé publishable de ton projet, enregistre, puis relance :
+```bash
+./start.sh
+```
+Ne mets jamais de clé secrète ou service_role dans ce fichier. Le fichier `.env` est ignoré par Git.
 
 ## Notifications Telegram (facultatif)
 Avant `./start.sh`, configure les variables dans le terminal :
