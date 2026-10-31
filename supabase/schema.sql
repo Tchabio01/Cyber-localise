@@ -34,7 +34,7 @@ create table if not exists public.cloud_threat_observations (
   origin text not null default 'local_collector',
   verified boolean not null default false,
   created_at timestamptz not null default now(),
-  unique (organization_id,ip,source)
+  unique (organization_id,ip,source,reported_by)
 );
 create table if not exists public.cloud_incident_events (
   id uuid primary key default gen_random_uuid(),
@@ -43,7 +43,7 @@ create table if not exists public.cloud_incident_events (
   severity text not null, category text not null, title text not null, detail text not null,
   ip inet, reported_by uuid not null default auth.uid() references auth.users(id),
   created_at timestamptz not null default now(),
-  unique (organization_id,local_event_id)
+  unique (organization_id,local_event_id,reported_by)
 );
 create table if not exists public.user_preferences (
   user_id uuid primary key references auth.users(id) on delete cascade,
