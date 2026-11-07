@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """CyberWatch Africa PRO 7.0 — defensive threat-intelligence dashboard for Termux."""
 from __future__ import annotations
-import csv, ipaddress, json, os, queue, socket, sqlite3, threading, time, urllib.request
-from collections import Counter
+import csv, ipaddress, json, os, socket, sqlite3, threading, time, urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +22,7 @@ ENABLE_HONEYPOT = os.getenv("CW_HONEYPOT", "0") == "1"
 HONEYPOT_PORT = int(os.getenv("CW_HONEYPOT_PORT", "2222"))
 TG_TOKEN, TG_CHAT = os.getenv("TG_TOKEN"), os.getenv("TG_CHAT")
 MAX_GEO_PER_CYCLE = 90
+MAX_HTTP_RESPONSE = 8 * 1024 * 1024
 USER_AGENT = "CyberWatch-Africa-PRO/7.0 (defensive threat intelligence)"
 SOURCES = [
     ("Feodo Tracker", "https://feodotracker.abuse.ch/downloads/ipblocklist.json", "feodo"),
@@ -29,6 +31,9 @@ SOURCES = [
 ]
 state_lock = threading.RLock()
 geo_lock = threading.Lock()
+collection_lock = threading.Lock()
+jobs_lock = threading.Lock()
+active_jobs: set[str] = set()
 stop_event = threading.Event()
 geo_cache: dict[str, dict | None] = {}
 last_errors: list[str] = []
@@ -39,12 +44,21 @@ runtime = {"last_update": None, "collecting": False, "source_status": {},
 def now_utc():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+@contextmanager
 def db():
     con = sqlite3.connect(DB_PATH, timeout=20)
     con.row_factory = sqlite3.Row
-    return con
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 def init_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with db() as con:
         con.executescript("""
         CREATE TABLE IF NOT EXISTS threats(
@@ -67,7 +81,10 @@ def http_get(url, data=None, timeout=20):
     req = urllib.request.Request(url, data=data, headers={"User-Agent": USER_AGENT,
         "Content-Type": "application/json" if data else "text/plain"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8", "replace")
+        body = r.read(MAX_HTTP_RESPONSE + 1)
+        if len(body) > MAX_HTTP_RESPONSE:
+            raise ValueError("La réponse distante dépasse la taille maximale autorisée.")
+        return body.decode("utf-8", "replace")
 
 def public_ip(value):
     try:
@@ -79,15 +96,16 @@ def public_ip(value):
 def parse_feed(body, feed_type):
     found = []
     if feed_type == "feodo":
-        try:
-            obj = json.loads(body)
-            rows = obj if isinstance(obj, list) else obj.get("data", [])
-            for row in rows:
-                ip = public_ip(row.get("ip_address", ""))
-                if ip:
-                    found.append((ip, row.get("malware") or "botnet"))
-        except (ValueError, TypeError, AttributeError):
-            pass
+        obj = json.loads(body)
+        rows = obj if isinstance(obj, list) else obj.get("data") if isinstance(obj, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Format du flux Feodo invalide.")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("Entrée invalide dans le flux Feodo.")
+            ip = public_ip(row.get("ip_address", ""))
+            if ip:
+                found.append((ip, str(row.get("malware") or "botnet")[:120]))
     else:
         kind = "brute-force" if feed_type == "bruteforce" else "scan/attaque"
         for line in body.splitlines():
@@ -101,11 +119,14 @@ def parse_feed(body, feed_type):
 
 def load_geo_cache():
     with db() as con:
-        for row in con.execute("SELECT ip,payload FROM geo_cache"):
+        for row in con.execute("SELECT ip,payload FROM geo_cache").fetchall():
             try:
-                geo_cache[row["ip"]] = json.loads(row["payload"]) if row["payload"] else None
+                if row["payload"]:
+                    geo_cache[row["ip"]] = json.loads(row["payload"])
+                else:
+                    con.execute("DELETE FROM geo_cache WHERE ip=?", (row["ip"],))
             except ValueError:
-                continue
+                con.execute("DELETE FROM geo_cache WHERE ip=?", (row["ip"],))
 
 def geolocate(ips, errors):
     with geo_lock:
@@ -117,14 +138,23 @@ def geolocate(ips, errors):
             data = json.loads(http_get(
                 "http://ip-api.com/batch?fields=status,country,countryCode,city,lat,lon,continent,continentCode,query",
                 json.dumps(todo).encode(), timeout=25))
+            if not isinstance(data, list):
+                raise ValueError("Format de réponse de géolocalisation invalide.")
             stamp = now_utc()
             with db() as con:
                 for item in data:
+                    if not isinstance(item, dict):
+                        continue
                     ip = item.get("query")
-                    val = item if item.get("status") == "success" else None
-                    geo_cache[ip] = val
-                    con.execute("INSERT OR REPLACE INTO geo_cache(ip,payload,checked_at) VALUES(?,?,?)",
-                                (ip, json.dumps(val) if val else None, stamp))
+                    if ip not in todo:
+                        continue
+                    if item.get("status") == "success":
+                        geo_cache[ip] = item
+                        con.execute("INSERT OR REPLACE INTO geo_cache(ip,payload,checked_at) VALUES(?,?,?)",
+                                    (ip, json.dumps(item), stamp))
+                    else:
+                        geo_cache.pop(ip, None)
+                        con.execute("DELETE FROM geo_cache WHERE ip=?", (ip,))
         except Exception as exc:
             errors.append("Géolocalisation : " + str(exc))
 
@@ -138,23 +168,28 @@ def record_event(severity, category, title, detail, ip=None):
                     (now_utc(), severity, category, title, detail, ip))
 
 def notify(title, message):
+    import subprocess
     try:
-        import subprocess
         subprocess.run(["termux-notification", "--title", title, "--content", message],
-                       timeout=8, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+                       timeout=8, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return "Notification Termux indisponible ou refusée."
+    return None
 
 def telegram(message):
     if not TG_TOKEN or not TG_CHAT:
-        return
+        return None
     try:
-        http_get("https://api.telegram.org/bot" + TG_TOKEN + "/sendMessage",
-                 json.dumps({"chat_id": TG_CHAT, "text": message}).encode(), timeout=12)
-    except Exception:
-        pass
+        response = json.loads(http_get(
+            "https://api.telegram.org/bot" + TG_TOKEN + "/sendMessage",
+            json.dumps({"chat_id": TG_CHAT, "text": message}).encode(), timeout=12))
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            return "Notification Telegram échouée ; vérifie la configuration et la connexion."
+    except (OSError, TimeoutError, ValueError):
+        return "Notification Telegram échouée ; vérifie la configuration et la connexion."
+    return None
 
-def collect_cycle():
+def _collect_cycle():
     errors, source_status, records = [], {}, {}
     with state_lock:
         runtime["collecting"] = True
@@ -198,8 +233,9 @@ def collect_cycle():
     for ip, country, kind in new_africa:
         msg = f"Nouvelle IP signalée : {ip} ({country}) — {kind}"
         record_event(severity_for(kind), "Threat feed", "Nouvelle IP signalée", msg, ip)
-        notify("CyberWatch Africa", msg)
-        telegram(msg)
+        for warning in (notify("CyberWatch Africa", msg), telegram(msg)):
+            if warning:
+                errors.append(warning)
 
     with state_lock:
         runtime["last_update"] = current
@@ -207,6 +243,36 @@ def collect_cycle():
         runtime["collecting"] = False
         last_errors[:] = errors
     return {"sources": source_status, "errors": errors, "new_africa": len(new_africa)}
+
+def collect_cycle():
+    with collection_lock:
+        return _collect_cycle()
+
+def start_job(name, target):
+    with jobs_lock:
+        if name in active_jobs:
+            return False
+        active_jobs.add(name)
+
+    def run():
+        try:
+            target()
+        except Exception as exc:
+            with state_lock:
+                last_errors[:] = [f"{name}: {exc}"]
+                if name == "refresh":
+                    runtime["collecting"] = False
+        finally:
+            with jobs_lock:
+                active_jobs.discard(name)
+
+    try:
+        threading.Thread(target=run, daemon=True, name=f"cyberwatch-{name}").start()
+    except Exception:
+        with jobs_lock:
+            active_jobs.discard(name)
+        raise
+    return True
 
 def background_loop():
     while not stop_event.is_set():
@@ -284,22 +350,25 @@ def investigate_ip(value):
 def local_network_scan():
     # Discovery only: ICMP/ping is not required. Probe TCP 80/443/22 on hosts
     # within the user's connected private /24; never targets public ranges.
+    with state_lock:
+        runtime["local_scan"] = {"status": "Analyse en cours…", "devices": []}
     try:
         import ipaddress
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("192.0.2.1", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
+        try:
+            s.connect(("192.0.2.1", 80))
+            local_ip = s.getsockname()[0]
+        finally:
+            s.close()
         addr = ipaddress.ip_address(local_ip)
         if not addr.is_private:
             raise RuntimeError("L'adresse détectée n'est pas privée.")
         net = ipaddress.ip_network(local_ip + "/24", strict=False)
-        devices = []
-        for host in list(net.hosts())[:254]:
-            target = str(host)
+        hosts = [str(host) for host in list(net.hosts())[:254]]
+
+        def inspect_host(target):
             if target == local_ip:
-                devices.append({"ip": target, "hostname": socket.gethostname(), "self": True})
-                continue
+                return {"ip": target, "hostname": socket.gethostname(), "self": True}
             opened = []
             for port in (80, 443, 22):
                 sock = socket.socket()
@@ -314,7 +383,11 @@ def local_network_scan():
             if opened:
                 try: name = socket.gethostbyaddr(target)[0]
                 except Exception: name = ""
-                devices.append({"ip": target, "hostname": name, "ports": opened})
+                return {"ip": target, "hostname": name, "ports": opened}
+            return None
+
+        with ThreadPoolExecutor(max_workers=32, thread_name_prefix="lan-scan") as pool:
+            devices = [device for device in pool.map(inspect_host, hosts) if device]
         stamp = now_utc()
         with db() as con:
             for d in devices:
@@ -338,9 +411,17 @@ def export_csv():
     writer = csv.writer(out)
     writer.writerow(["ip","source","type","label","country","country_code","city","latitude","longitude","first_seen_utc","last_seen_utc"])
     for r in rows:
-        writer.writerow([r["ip"],r["source"],r["kind"],r["label"],r["country"],r["country_code"],
-                         r["city"],r["lat"],r["lon"],r["first_seen"],r["last_seen"]])
+        writer.writerow([csv_safe(r["ip"]),csv_safe(r["source"]),csv_safe(r["kind"]),
+                         csv_safe(r["label"]),csv_safe(r["country"]),csv_safe(r["country_code"]),
+                         csv_safe(r["city"]),r["lat"],r["lon"],csv_safe(r["first_seen"]),
+                         csv_safe(r["last_seen"])])
     return out.getvalue().encode("utf-8-sig")
+
+def csv_safe(value):
+    text = "" if value is None else str(value)
+    if text.lstrip(" \t\r\n")[:1] in {"=", "+", "-", "@"}:
+        return "'" + text
+    return text
 
 def export_json():
     with db() as con:
@@ -351,6 +432,8 @@ def export_json():
 
 def device_diagnostics():
     import platform
+    with state_lock:
+        runtime["device_info"] = {"status": "Diagnostic en cours"}
     info = {"platform": platform.platform(), "python": platform.python_version(),
             "hostname": socket.gethostname(), "local_ip": None, "dns": "Non testé", "internet": False,
             "limits": "Termux ne fournit pas à Python un accès complet au trafic Android sans VPN local, permissions adaptées ou root."}
@@ -363,7 +446,8 @@ def device_diagnostics():
     except OSError: info["dns"] = "Échec de résolution"
     try:
         http_get("https://www.google.com/generate_204", timeout=6); info["internet"] = True
-    except Exception: pass
+    except (OSError, TimeoutError, ValueError) as exc:
+        info["internet_error"] = str(exc)
     info["status"] = "Diagnostic terminé"
     with state_lock: runtime["device_info"] = info
     return info
@@ -378,7 +462,8 @@ def report_html():
       f"<p>IP distinctes (48 h) : <b>{st['total']}</b> — IP géolocalisées en Afrique : <b>{st['africa']}</b> — Incidents (24 h) : <b>{st['events_24h']}</b></p>"
       f"<h2>Pays africains les plus représentés</h2><table><tr><th>Pays</th><th>IP</th></tr>{rows}</table>"
       f"<h2>Journal récent</h2><table><tr><th>Date UTC</th><th>Gravité</th><th>Événement</th><th>IP</th></tr>{ev}</table>"
-      "<p>Une IP de threat-intel n'est pas une preuve d'attaque contre cet appareil. Géolocalisation approximative.</p><button onclick='window.print()'>Imprimer / Enregistrer en PDF</button></html>").encode()
+      "<p>Une IP de threat-intel n'est pas une preuve d'attaque contre cet appareil. Géolocalisation approximative.</p>"
+      "<p>Pour imprimer ou enregistrer en PDF, utilise la fonction d'impression de ton navigateur.</p></html>").encode()
 
 def html_escape(value):
     import html
@@ -392,22 +477,118 @@ def json_payload():
     return {"stats": stats_data(), "points": points_data(), "events": events_data(60), "runtime": status,
             "home": HOME, "refresh_seconds": REFRESH}
 
+class BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+    request_queue_size = 16
+    max_workers = 24
+
+    def __init__(self, server_address, request_handler):
+        self.worker_slots = threading.BoundedSemaphore(self.max_workers)
+        super().__init__(server_address, request_handler)
+
+    def process_request(self, request, client_address):
+        if not self.worker_slots.acquire(blocking=False):
+            try:
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Connection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.worker_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.worker_slots.release()
+
 class Handler(BaseHTTPRequestHandler):
-    def reply(self, code, body, ctype="application/json; charset=utf-8"):
+    server_version = "CyberWatch"
+    sys_version = ""
+
+    def reply(self, code, body, ctype="application/json; charset=utf-8", headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self' https: data: 'unsafe-inline'; img-src 'self' https: data:")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; "
+            "style-src 'self' https://unpkg.com 'unsafe-inline'; "
+            "img-src 'self' https: data:; connect-src 'self' https:; "
+            "font-src 'self' https: data:; object-src 'none'; base-uri 'self'; "
+            "frame-ancestors 'none'; form-action 'self'",
+        )
+        for name, value in headers or ():
+            self.send_header(name, value)
         self.end_headers()
         try: self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError): pass
+
+    def valid_host(self):
+        authority = self.headers.get("Host", "")
+        try:
+            parsed = urlparse("//" + authority)
+            hostname = (parsed.hostname or "").lower()
+            port = parsed.port if parsed.port is not None else 80
+        except ValueError:
+            return False
+        return (
+            hostname in {"127.0.0.1", "localhost", "::1"}
+            and port == PORT
+            and not parsed.username
+            and not parsed.password
+            and not parsed.path
+        )
+
+    def valid_origin(self):
+        origin = self.headers.get("Origin", "")
+        try:
+            parsed = urlparse(origin)
+            return (
+                parsed.scheme == "http"
+                and parsed.netloc.lower() == self.headers.get("Host", "").lower()
+                and parsed.path == ""
+                and not parsed.query
+                and not parsed.fragment
+                and not parsed.username
+                and not parsed.password
+            )
+        except ValueError:
+            return False
+
     def do_GET(self):
+        if not self.valid_host():
+            self.reply(421, b'{"error":"Hote local non autorise"}')
+            return
         path = urlparse(self.path).path
+        fetch_site = self.headers.get("Sec-Fetch-Site")
+        if path.startswith("/api/") and (
+            (fetch_site and fetch_site != "same-origin")
+            or (self.headers.get("Origin") and not self.valid_origin())
+        ):
+            self.reply(403, b'{"error":"Requete intersite refusee"}')
+            return
         if path == "/":
             self.reply(200, (ROOT/"static"/"index.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/app.js":
             self.reply(200, (ROOT/"static"/"app.js").read_bytes(), "application/javascript; charset=utf-8")
+        elif path == "/auth.js":
+            self.reply(200, (ROOT/"static"/"auth.js").read_bytes(), "application/javascript; charset=utf-8")
+        elif path == "/advanced.js":
+            self.reply(200, (ROOT/"static"/"advanced.js").read_bytes(), "application/javascript; charset=utf-8")
         elif path == "/style.css":
             self.reply(200, (ROOT/"static"/"style.css").read_bytes(), "text/css; charset=utf-8")
         elif path == "/config.js":
@@ -424,33 +605,65 @@ class Handler(BaseHTTPRequestHandler):
             try: self.reply(200, json.dumps(investigate_ip(ip)).encode())
             except ValueError as exc: self.reply(400, json.dumps({"error":str(exc)}).encode())
         elif path == "/api/export.csv":
-            self.reply(200, export_csv(), "text/csv; charset=utf-8")
+            self.reply(200, export_csv(), "text/csv; charset=utf-8",
+                       [("Content-Disposition", 'attachment; filename="cyberwatch-threats.csv"')])
         elif path == "/api/export.json":
-            self.reply(200, export_json(), "application/json; charset=utf-8")
+            self.reply(200, export_json(), "application/json; charset=utf-8",
+                       [("Content-Disposition", 'attachment; filename="cyberwatch-export.json"')])
         elif path == "/api/report":
             self.reply(200, report_html(), "text/html; charset=utf-8")
         else:
             self.reply(404, b'{"error":"Not found"}')
     def do_POST(self):
+        fetch_site = self.headers.get("Sec-Fetch-Site")
+        if (
+            not self.valid_host()
+            or not self.valid_origin()
+            or (fetch_site and fetch_site != "same-origin")
+        ):
+            self.reply(403, b'{"error":"Origine non autorisee"}')
+            return
+        if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Length", "0") != "0":
+            self.close_connection = True
+            self.reply(413, b'{"error":"Corps de requete non accepte"}')
+            return
         path = urlparse(self.path).path
         if path == "/api/refresh":
-            threading.Thread(target=collect_cycle, daemon=True).start()
-            self.reply(202, b'{"status":"Collecte demandee"}')
+            if start_job("refresh", collect_cycle):
+                self.reply(202, b'{"status":"Collecte demandee"}')
+            else:
+                self.reply(409, b'{"error":"Collecte deja en cours"}')
         elif path == "/api/local-scan":
-            threading.Thread(target=local_network_scan, daemon=True).start()
-            self.reply(202, b'{"status":"Analyse locale demarree"}')
+            if start_job("local-scan", local_network_scan):
+                self.reply(202, b'{"status":"Analyse locale demarree"}')
+            else:
+                self.reply(409, b'{"error":"Analyse locale deja en cours"}')
         elif path == "/api/device-diagnostics":
-            threading.Thread(target=device_diagnostics, daemon=True).start()
-            self.reply(202, b'{"status":"Diagnostic demarre"}')
+            if start_job("device-diagnostics", device_diagnostics):
+                self.reply(202, b'{"status":"Diagnostic demarre"}')
+            else:
+                self.reply(409, b'{"error":"Diagnostic deja en cours"}')
         else:
             self.reply(404, b'{"error":"Not found"}')
     def log_message(self, *args): pass
 
 def main():
-    init_db()
-    load_geo_cache()
+    if HOST != "127.0.0.1":
+        raise SystemExit("CyberWatch refuse une ecoute reseau. Utilise CW_HOST=127.0.0.1.")
+    if os.name != "nt":
+        previous_umask = os.umask(0o077)
+        try:
+            init_db()
+            load_geo_cache()
+        finally:
+            os.umask(previous_umask)
+    else:
+        init_db()
+        load_geo_cache()
+    if os.name != "nt":
+        os.chmod(DB_PATH, 0o600)
     threading.Thread(target=background_loop, daemon=True).start()
-    print("\\n CYBERWATCH AFRICA PRO 7.0")
+    print("\n CYBERWATCH AFRICA PRO 7.0")
     print(f" Tableau : http://127.0.0.1:{PORT}")
     print(f" Base : {DB_PATH}")
     print(f" Cycle : {REFRESH}s | Honeypot : {'ACTIF' if ENABLE_HONEYPOT else 'désactivé'}")
@@ -458,36 +671,58 @@ def main():
     if ENABLE_HONEYPOT:
         threading.Thread(target=honeypot_server, daemon=True).start()
     try:
-        ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+        BoundedThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
     except KeyboardInterrupt:
         stop_event.set()
-        print("\\nArrêt de CyberWatch Africa.")
+        print("\nArrêt de CyberWatch Africa.")
 
 def honeypot_server():
     # Listener passif minimal, facultatif. Ne collecte que bannière client SSH.
     sock = socket.socket()
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    clients = threading.BoundedSemaphore(10)
     try:
-        sock.bind(("0.0.0.0", HONEYPOT_PORT)); sock.listen(10)
+        sock.bind(("127.0.0.1", HONEYPOT_PORT)); sock.listen(10)
         print(f"[HONEYPOT] Port {HONEYPOT_PORT}")
     except OSError as exc:
         print("[HONEYPOT] Désactivé :", exc); return
     while not stop_event.is_set():
         try: conn, addr = sock.accept()
         except OSError: break
-        threading.Thread(target=honeypot_client, args=(conn, addr), daemon=True).start()
+        if not clients.acquire(blocking=False):
+            conn.close()
+            continue
+
+        def handle_client(client, address):
+            try:
+                honeypot_client(client, address)
+            finally:
+                clients.release()
+
+        try:
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+        except Exception:
+            clients.release()
+            conn.close()
+            raise
 
 def honeypot_client(conn, addr):
-    ip = public_ip(addr[0])
+    try:
+        ip = str(ipaddress.ip_address(addr[0]))
+    except ValueError:
+        ip = None
     banner = ""
     try:
-        conn.settimeout(4); conn.sendall(b"SSH-2.0-CyberWatch-Research\\r\\n")
+        conn.settimeout(4); conn.sendall(b"SSH-2.0-CyberWatch-Research\r\n")
         banner = conn.recv(128).decode("ascii","ignore").strip()[:80]
-    except Exception: pass
+    except (OSError, UnicodeError):
+        pass
     finally: conn.close()
     if ip:
         record_event("À examiner","Honeypot","Connexion entrante observée",banner or "Bannière absente",ip)
-        notify("CyberWatch honeypot", f"Connexion observée depuis {ip}")
+        warning = notify("CyberWatch honeypot", f"Connexion observée depuis {ip}")
+        if warning:
+            print("[HONEYPOT]", warning)
 
 if __name__ == "__main__":
     main()

@@ -9,7 +9,7 @@ Plateforme locale de veille défensive et d'apprentissage SOC. Interface sombre 
 - Investigation d'IP publique, DNS inverse et correspondances avec les flux.
 - Découverte LAN limitée au sous-réseau privé /24 détecté et ports TCP 22, 80, 443.
 - Diagnostic de base du téléphone, DNS et Internet.
-- Honeypot SSH expérimental facultatif, journal SQLite, notifications Termux et Telegram facultatives.
+- Honeypot SSH expérimental facultatif limité à `127.0.0.1`, avec un maximum de dix connexions simultanées.
 - Exports CSV / JSON et rapport imprimable en PDF via le navigateur.
 
 ## Installation Termux
@@ -56,10 +56,10 @@ export CW_HONEYPOT=1
 export CW_HONEYPOT_PORT=2222
 ./start.sh
 ```
-Ne l'active pas sur un réseau public ou un appareil tiers. Il s'agit d'un listener de démonstration, pas d'un serveur SSH sécurisé.
+Le listener reste accessible uniquement depuis l'appareil local. Il ne collecte que la bannière du client et n'est pas un serveur SSH sécurisé.
 
 ## Configuration
-- `CW_HOST` : `127.0.0.1` par défaut (conserve cette valeur pour un usage local).
+- `CW_HOST` : doit rester `127.0.0.1`. Les interfaces réseau et les autres adresses sont refusées.
 - `CW_PORT` : `8080` par défaut.
 - `CW_REFRESH` : intervalle de collecte en secondes (minimum 180).
 - `CW_DB` : chemin facultatif de la base SQLite.
@@ -103,6 +103,6 @@ Les scores sont indicatifs. Ces modules ne remplacent ni un antivirus ni un SOC 
 3. Redémarrer CyberWatch et créer un compte puis une organisation.
 4. Pour attribuer l'administration globale, définir app_metadata.platform_role=admin par un canal d'administration Supabase. Ne jamais utiliser user_metadata pour les autorisations.
 
-**Sécurité importante :** ne publie pas directement le serveur Python actuel sur Internet. Ses API locales ne valident pas encore les JWT côté serveur et n'intègrent pas de reverse proxy HTTPS. Pour un déploiement public, il faudra terminer cette couche, activer HTTPS et configurer les règles réseau. La synchronisation cloud utilise RLS, mais cela ne protège pas à lui seul les routes locales.
+**Sécurité importante :** le serveur Python écoute uniquement sur `127.0.0.1` et refuse les autres valeurs de `CW_HOST`. Les contrôles d’hôte et d’origine protègent les routes locales contre les requêtes web intersites courantes, mais l’API locale ne valide pas les JWT Supabase et ne protège pas contre un autre programme malveillant déjà exécuté sur l’appareil. Ne modifie pas le code pour publier directement ce serveur sur Internet ; un déploiement public exige une architecture distincte, une authentification côté serveur, HTTPS et une revue de sécurité.
 
 Les observations synchronisées sont des contributions rapportées par un membre et ne sont pas automatiquement certifiées. Leur source et leur date restent visibles.

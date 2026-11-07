@@ -2,8 +2,11 @@
 (()=>{
 const $=id=>document.getElementById(id);
 const cfg=window.CW_SUPABASE_CONFIG||{};
-let client=null,user=null,activeOrg=localStorage.getItem('cw_active_org')||'';
+let client=null,user=null,activeOrg='';
+try{activeOrg=localStorage.getItem('cw_active_org')||'';}catch{}
 const status=(id,msg)=>{const el=$(id);if(el)el.textContent=msg;};
+const errorText=e=>e instanceof Error?e.message:String(e);
+function storeActiveOrg(){try{localStorage.setItem('cw_active_org',activeOrg);}catch{status('cloud-state','Choix d’organisation actif pour cette session, mais le navigateur ne peut pas le mémoriser.');}}
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function showSession(on){$('auth-forms').hidden=on;$('account-session').hidden=!on;}
 async function refreshOrgs(){
@@ -12,7 +15,7 @@ async function refreshOrgs(){
  if(error)throw error;sel.innerHTML='<option value="">Choisir une organisation</option>';
  for(const m of data||[]){const o=document.createElement('option');o.value=m.organization_id;o.textContent=(m.organizations?.name||'Organisation')+' — '+m.role;sel.append(o);}
  if(data?.some(x=>x.organization_id===activeOrg))sel.value=activeOrg;
- else if(data?.length){activeOrg=data[0].organization_id;sel.value=activeOrg;localStorage.setItem('cw_active_org',activeOrg);}
+ else{activeOrg=data?.[0]?.organization_id||'';sel.value=activeOrg;storeActiveOrg();}
  await loadAdmin();
 }
 async function loadProfile(){
@@ -27,7 +30,7 @@ async function loadAdmin(){
  if(profiles.error||orgs.error){status('admin-state','Erreur : '+(profiles.error||orgs.error).message);return;}
  $('admin-users-count').textContent=profiles.data.length;$('admin-orgs-count').textContent=orgs.data.length;
  $('admin-users').innerHTML=profiles.data.map(p=>'<div class="admin-user"><b>'+esc(p.display_name||'Sans nom')+'</b><small>'+esc(p.user_id)+' • '+esc(p.created_at)+'</small></div>').join('')||'Aucun profil';
- if(activeOrg){const {data,error}=await client.from('organization_members').select('user_id,role,created_at').eq('organization_id',activeOrg);$('admin-members').innerHTML=error?esc(error.message):(data||[]).map(m=>'<div class="admin-user">'+esc(m.user_id)+' — '+esc(m.role)+'</div>').join('')||'Aucun membre';}
+ if(activeOrg){const {data,error}=await client.from('organization_members').select('user_id,role,created_at').eq('organization_id',activeOrg);$('admin-members').innerHTML=error?esc(error.message):(data||[]).map(m=>'<div class="admin-user">'+esc(m.user_id)+' — '+esc(m.role)+'</div>').join('')||'Aucun membre';}else $('admin-members').textContent='Choisis une organisation.';
 }
 async function syncCloud(){
  if(!activeOrg)throw Error('Choisis ou crée une organisation avant la synchronisation.');
@@ -45,19 +48,19 @@ async function syncCloud(){
 async function init(){
  if(!cfg.url||!cfg.publishableKey){status('cloud-state','Cloud non configuré. Renseigne CW_SUPABASE_URL et CW_SUPABASE_PUBLISHABLE_KEY sur le serveur.');return;}
  if(!window.supabase?.createClient){status('cloud-state','Bibliothèque Supabase indisponible. Vérifie la connexion Internet.');return;}
- client=window.supabase.createClient(cfg.url,cfg.publishableKey);
+ try{client=window.supabase.createClient(cfg.url,cfg.publishableKey);}catch(e){status('cloud-state','Configuration Supabase invalide : '+errorText(e));return;}
  status('cloud-state','Service cloud configuré. Connecte-toi pour accéder à ton espace.');
- $('signup-form').onsubmit=async e=>{e.preventDefault();status('cloud-state','Création du compte…');const {data,error}=await client.auth.signUp({email:$('signup-email').value,password:$('signup-password').value,options:{data:{display_name:$('signup-name').value.trim()}}});if(error){status('cloud-state',error.message);return;}if(data.session){user=data.user;await afterLogin();}else status('cloud-state','Compte créé. Consulte ta boîte e-mail pour confirmer ton adresse avant la première connexion.');};
- $('signin-form').onsubmit=async e=>{e.preventDefault();const {data,error}=await client.auth.signInWithPassword({email:$('signin-email').value,password:$('signin-password').value});if(error){status('cloud-state',error.message);return;}user=data.user;await afterLogin();};
- $('signout-button').onclick=async()=>{await client.auth.signOut();user=null;showSession(false);status('cloud-state','Déconnexion effectuée.');};
- $('profile-form').onsubmit=async e=>{e.preventDefault();const {error}=await client.from('profiles').upsert({user_id:user.id,display_name:$('profile-name').value.trim(),updated_at:new Date().toISOString()});status('cloud-state',error?'Profil non enregistré : '+error.message:'Profil enregistré dans le cloud.');};
- $('org-create-form').onsubmit=async e=>{e.preventDefault();const name=$('org-name').value.trim();const {data,error}=await client.from('organizations').insert({name,created_by:user.id}).select('id').single();if(error){status('cloud-state','Création impossible : '+error.message);return;}activeOrg=data.id;localStorage.setItem('cw_active_org',activeOrg);$('org-name').value='';await refreshOrgs();status('cloud-state','Organisation créée. Tu en es propriétaire.');};
- $('org-select').onchange=async e=>{activeOrg=e.target.value;localStorage.setItem('cw_active_org',activeOrg);await loadAdmin();};
+ $('signup-form').onsubmit=async e=>{e.preventDefault();status('cloud-state','Création du compte…');try{const {data,error}=await client.auth.signUp({email:$('signup-email').value,password:$('signup-password').value,options:{data:{display_name:$('signup-name').value.trim()}}});if(error)throw error;if(data.session){user=data.user;await afterLogin();}else status('cloud-state','Compte créé. Consulte ta boîte e-mail pour confirmer ton adresse avant la première connexion.');}catch(error){status('cloud-state','Inscription impossible : '+errorText(error));}};
+ $('signin-form').onsubmit=async e=>{e.preventDefault();status('cloud-state','Connexion…');try{const {data,error}=await client.auth.signInWithPassword({email:$('signin-email').value,password:$('signin-password').value});if(error)throw error;user=data.user;await afterLogin();}catch(error){status('cloud-state','Connexion impossible : '+errorText(error));}};
+ $('signout-button').onclick=async()=>{try{const {error}=await client.auth.signOut();if(error)throw error;user=null;activeOrg='';storeActiveOrg();showSession(false);status('cloud-state','Déconnexion effectuée.');}catch(error){status('cloud-state','Déconnexion impossible : '+errorText(error));}};
+ $('profile-form').onsubmit=async e=>{e.preventDefault();try{const {error}=await client.from('profiles').upsert({user_id:user.id,display_name:$('profile-name').value.trim(),updated_at:new Date().toISOString()});if(error)throw error;status('cloud-state','Profil enregistré dans le cloud.');}catch(error){status('cloud-state','Profil non enregistré : '+errorText(error));}};
+ $('org-create-form').onsubmit=async e=>{e.preventDefault();const name=$('org-name').value.trim();try{const {data,error}=await client.from('organizations').insert({name,created_by:user.id}).select('id').single();if(error)throw error;activeOrg=data.id;storeActiveOrg();$('org-name').value='';await refreshOrgs();status('cloud-state','Organisation créée. Tu en es propriétaire.');}catch(error){status('cloud-state','Création impossible : '+errorText(error));}};
+ $('org-select').onchange=async e=>{activeOrg=e.target.value;storeActiveOrg();try{await loadAdmin();}catch(error){status('admin-state','Chargement impossible : '+errorText(error));}};
  $('cloud-sync-button').onclick=async()=>{try{await syncCloud();}catch(e){status('sync-state','Échec de synchronisation : '+e.message);}};
- $('team-add-form').onsubmit=async e=>{e.preventDefault();if(!activeOrg){status('team-state','Choisis une organisation.');return;}const {error}=await client.from('organization_members').insert({organization_id:activeOrg,user_id:$('team-user-id').value.trim(),role:$('team-role').value});status('team-state',error?'Ajout refusé : '+error.message:'Membre ajouté à l’organisation.');if(!error){$('team-user-id').value='';await refreshOrgs();}};
- const {data:{session}}=await client.auth.getSession();if(session){user=session.user;await afterLogin();}
- client.auth.onAuthStateChange(async(_event,session)=>{if(session){user=session.user;await afterLogin();}else{user=null;showSession(false);}});
+ $('team-add-form').onsubmit=async e=>{e.preventDefault();if(!activeOrg){status('team-state','Choisis une organisation.');return;}try{const {error}=await client.from('organization_members').insert({organization_id:activeOrg,user_id:$('team-user-id').value.trim(),role:$('team-role').value});if(error)throw error;$('team-user-id').value='';status('team-state','Membre ajouté à l’organisation.');await refreshOrgs();}catch(error){status('team-state','Ajout refusé : '+errorText(error));}};
+ try{const {data:{session},error}=await client.auth.getSession();if(error)throw error;if(session){user=session.user;await afterLogin();}}catch(error){status('cloud-state','Impossible de récupérer la session : '+errorText(error));}
+ client.auth.onAuthStateChange((_event,session)=>{if(session){user=session.user;queueMicrotask(()=>afterLogin().catch(error=>status('cloud-state','Session active, mais chargement impossible : '+errorText(error))));}else{user=null;activeOrg='';showSession(false);}});
 }
-async function afterLogin(){showSession(true);status('cloud-state','Connecté : '+(user.email||user.id));try{await loadProfile();await refreshOrgs();}catch(e){status('cloud-state','Connecté, mais profil/organisations indisponibles : '+e.message);}}
+async function afterLogin(){showSession(true);status('cloud-state','Connecté : '+(user.email||user.id));try{await loadProfile();await refreshOrgs();}catch(e){status('cloud-state','Connecté, mais profil/organisations indisponibles : '+errorText(e));}}
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
 })();

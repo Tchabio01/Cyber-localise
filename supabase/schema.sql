@@ -86,6 +86,8 @@ as $$
 $$;
 grant execute on function private.is_org_member(uuid) to authenticated;
 grant execute on function private.has_org_role(uuid,text[]) to authenticated;
+revoke all on function private.is_org_member(uuid) from public, anon;
+revoke all on function private.has_org_role(uuid,text[]) from public, anon;
 
 create or replace function private.add_org_owner()
 returns trigger language plpgsql security definer set search_path = ''
@@ -99,6 +101,8 @@ $$;
 drop trigger if exists organizations_add_owner on public.organizations;
 create trigger organizations_add_owner after insert on public.organizations
 for each row execute function private.add_org_owner();
+revoke all on function private.create_profile_for_new_user() from public, anon, authenticated;
+revoke all on function private.add_org_owner() from public, anon, authenticated;
 
 alter table public.profiles enable row level security;
 alter table public.organizations enable row level security;
@@ -168,10 +172,14 @@ create policy preferences_self_all on public.user_preferences for all to authent
 using (user_id = (select auth.uid()))
 with check (user_id = (select auth.uid()));
 
+revoke all on table public.profiles, public.organizations,
+  public.organization_members, public.cloud_threat_observations,
+  public.cloud_incident_events, public.user_preferences
+  from public, anon, authenticated;
+
 grant select, insert, update on public.profiles to authenticated;
 grant select, insert, update, delete on public.organizations to authenticated;
 grant select, insert, delete on public.organization_members to authenticated;
-revoke all on public.cloud_threat_observations from anon, authenticated;
 grant select on public.cloud_threat_observations to authenticated;
 grant insert (organization_id,ip,source,kind,label,country,country_code,city,lat,lon,first_seen,last_seen,reported_by,origin) on public.cloud_threat_observations to authenticated;
 grant update (organization_id,ip,source,reported_by,kind,label,country,country_code,city,lat,lon,first_seen,last_seen,origin) on public.cloud_threat_observations to authenticated;
