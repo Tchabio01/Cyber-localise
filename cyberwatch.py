@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CyberWatch Africa PRO 7.0 — defensive threat-intelligence dashboard for Termux."""
 from __future__ import annotations
-import csv, ipaddress, json, os, socket, sqlite3, threading, time, urllib.request
+import csv, ipaddress, json, os, re, socket, sqlite3, threading, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -29,6 +29,7 @@ SOURCES = [
     ("Blocklist.de", "https://lists.blocklist.de/lists/all.txt", "bruteforce"),
     ("Emerging Threats", "https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt", "scan"),
 ]
+CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 state_lock = threading.RLock()
 geo_lock = threading.Lock()
 collection_lock = threading.Lock()
@@ -39,7 +40,8 @@ geo_cache: dict[str, dict | None] = {}
 last_errors: list[str] = []
 runtime = {"last_update": None, "collecting": False, "source_status": {},
            "local_scan": {"status": "Pas encore exécuté", "devices": []},
-           "device_info": {"status": "Diagnostic non exécuté"}}
+           "device_info": {"status": "Diagnostic non exécuté"},
+           "vulnerability_status": {"status": "Jamais synchronisé", "count": 0, "updated_at": None}}
 
 def now_utc():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -75,6 +77,19 @@ def init_db():
           ip TEXT PRIMARY KEY, hostname TEXT, first_seen TEXT, last_seen TEXT);
         CREATE TABLE IF NOT EXISTS scan_runs(
           id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, subnet TEXT, found INTEGER, note TEXT);
+        CREATE TABLE IF NOT EXISTS incidents(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL UNIQUE,
+          status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','resolved')),
+          assignee TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS vulnerabilities(
+          cve TEXT PRIMARY KEY, vendor TEXT NOT NULL DEFAULT '', product TEXT NOT NULL DEFAULT '',
+          vulnerability_name TEXT NOT NULL DEFAULT '', date_added TEXT, due_date TEXT,
+          ransomware_use TEXT NOT NULL DEFAULT 'Unknown', description TEXT NOT NULL DEFAULT '',
+          required_action TEXT NOT NULL DEFAULT '', source_url TEXT NOT NULL, fetched_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_vulnerabilities_date ON vulnerabilities(date_added DESC);
+        INSERT OR IGNORE INTO incidents(event_id, updated_at) SELECT id, ts FROM events;
         """)
 
 def http_get(url, data=None, timeout=20):
@@ -163,9 +178,12 @@ def severity_for(kind):
             "scan/attaque": "Moyen", "honeypot": "À examiner"}.get(kind, "Faible")
 
 def record_event(severity, category, title, detail, ip=None):
+    stamp = now_utc()
     with db() as con:
-        con.execute("INSERT INTO events(ts,severity,category,title,detail,ip) VALUES(?,?,?,?,?,?)",
-                    (now_utc(), severity, category, title, detail, ip))
+        cur = con.execute("INSERT INTO events(ts,severity,category,title,detail,ip) VALUES(?,?,?,?,?,?)",
+                          (stamp, severity, category, title, detail, ip))
+        con.execute("INSERT OR IGNORE INTO incidents(event_id, updated_at) VALUES(?,?)",
+                    (cur.lastrowid, stamp))
 
 def notify(title, message):
     import subprocess
@@ -330,6 +348,90 @@ def points_data():
 def events_data(limit=100):
     with db() as con:
         return [dict(r) for r in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))]
+
+def incidents_data(limit=200):
+    with db() as con:
+        rows = con.execute("""SELECT i.id,i.event_id,i.status,i.assignee,i.resolution,i.updated_at,
+            e.ts,e.severity,e.category,e.title,e.detail,e.ip
+            FROM incidents i JOIN events e ON e.id=i.event_id
+            ORDER BY CASE i.status WHEN 'open' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
+            e.ts DESC LIMIT ?""", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+def update_incident(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Corps JSON invalide.")
+    try:
+        incident_id = int(payload.get("incident_id"))
+    except (TypeError, ValueError):
+        raise ValueError("Identifiant d'incident invalide.")
+    status = str(payload.get("status", ""))
+    if status not in {"open", "in_progress", "resolved"}:
+        raise ValueError("Statut non autorisé.")
+    assignee = str(payload.get("assignee", "")).strip()
+    resolution = str(payload.get("resolution", "")).strip()
+    if len(assignee) > 120 or len(resolution) > 2000:
+        raise ValueError("Champ trop long.")
+    stamp = now_utc()
+    with db() as con:
+        cur = con.execute("""UPDATE incidents SET status=?,assignee=?,resolution=?,updated_at=?
+            WHERE id=?""", (status, assignee, resolution, stamp, incident_id))
+        if cur.rowcount != 1:
+            raise ValueError("Incident introuvable.")
+    return {"id": incident_id, "status": status, "updated_at": stamp}
+
+def vulnerabilities_data(limit=200):
+    with db() as con:
+        rows = con.execute("""SELECT cve,vendor,product,vulnerability_name,date_added,due_date,
+            ransomware_use,description,required_action,source_url,fetched_at
+            FROM vulnerabilities ORDER BY date_added DESC,cve DESC LIMIT ?""", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+def refresh_vulnerabilities():
+    with state_lock:
+        runtime["vulnerability_status"] = {"status": "Synchronisation en cours", "count": 0,
+                                           "updated_at": None}
+    try:
+        payload = json.loads(http_get(CISA_KEV_URL, timeout=45))
+        rows = payload.get("vulnerabilities") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Format du catalogue CISA KEV invalide.")
+        stamp = now_utc()
+        saved = 0
+        with db() as con:
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                cve = str(item.get("cveID") or "").strip().upper()
+                if not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve):
+                    continue
+                values = (
+                    cve, str(item.get("vendorProject") or "")[:180],
+                    str(item.get("product") or "")[:180],
+                    str(item.get("vulnerabilityName") or "")[:300],
+                    str(item.get("dateAdded") or "")[:20], str(item.get("dueDate") or "")[:20],
+                    str(item.get("knownRansomwareCampaignUse") or "Unknown")[:40],
+                    str(item.get("shortDescription") or "")[:2000],
+                    str(item.get("requiredAction") or "")[:1000], CISA_KEV_URL, stamp)
+                con.execute("""INSERT INTO vulnerabilities
+                    (cve,vendor,product,vulnerability_name,date_added,due_date,ransomware_use,
+                     description,required_action,source_url,fetched_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(cve) DO UPDATE SET vendor=excluded.vendor,product=excluded.product,
+                    vulnerability_name=excluded.vulnerability_name,date_added=excluded.date_added,
+                    due_date=excluded.due_date,ransomware_use=excluded.ransomware_use,
+                    description=excluded.description,required_action=excluded.required_action,
+                    source_url=excluded.source_url,fetched_at=excluded.fetched_at""", values)
+                saved += 1
+        result = {"status": "Synchronisation terminée", "count": saved, "updated_at": stamp}
+        with state_lock:
+            runtime["vulnerability_status"] = result
+        return result
+    except Exception as exc:
+        with state_lock:
+            runtime["vulnerability_status"] = {"status": "Échec : " + str(exc)[:220],
+                                               "count": 0, "updated_at": None}
+        raise
 
 def investigate_ip(value):
     ip = public_ip(value)
@@ -535,7 +637,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         try: self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError): pass
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError): pass
 
     def valid_host(self):
         authority = self.headers.get("Host", "")
@@ -589,6 +691,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, (ROOT/"static"/"auth.js").read_bytes(), "application/javascript; charset=utf-8")
         elif path == "/advanced.js":
             self.reply(200, (ROOT/"static"/"advanced.js").read_bytes(), "application/javascript; charset=utf-8")
+        elif path == "/neuro.js":
+            self.reply(200, (ROOT/"static"/"neuro.js").read_bytes(), "application/javascript; charset=utf-8")
         elif path == "/style.css":
             self.reply(200, (ROOT/"static"/"style.css").read_bytes(), "text/css; charset=utf-8")
         elif path == "/config.js":
@@ -600,6 +704,14 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, json.dumps(json_payload()).encode())
         elif path == "/api/events":
             self.reply(200, json.dumps(events_data(200)).encode())
+        elif path == "/api/incidents":
+            self.reply(200, json.dumps(incidents_data(200), ensure_ascii=False).encode())
+        elif path == "/api/vulnerabilities":
+            self.reply(200, json.dumps(vulnerabilities_data(250), ensure_ascii=False).encode())
+        elif path == "/api/vulnerabilities/status":
+            with state_lock:
+                status = dict(runtime["vulnerability_status"])
+            self.reply(200, json.dumps(status, ensure_ascii=False).encode())
         elif path == "/api/investigate":
             ip = parse_qs(urlparse(self.path).query).get("ip", [""])[0]
             try: self.reply(200, json.dumps(investigate_ip(ip)).encode())
@@ -623,9 +735,21 @@ class Handler(BaseHTTPRequestHandler):
         ):
             self.reply(403, b'{"error":"Origine non autorisee"}')
             return
-        if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Length", "0") != "0":
+        if self.headers.get("Transfer-Encoding"):
             self.close_connection = True
-            self.reply(413, b'{"error":"Corps de requete non accepte"}')
+            self.reply(413, b'{"error":"Encodage de requete non accepte"}')
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            content_length = 999999
+        if content_length < 0 or content_length > 8192:
+            self.close_connection = True
+            self.reply(413, b'{"error":"Corps de requete trop volumineux"}')
+            return
+        body = self.rfile.read(content_length) if content_length else b""
+        if body and not self.headers.get("Content-Type", "").lower().startswith("application/json"):
+            self.reply(415, b'{"error":"Content-Type application/json requis"}')
             return
         path = urlparse(self.path).path
         if path == "/api/refresh":
@@ -643,6 +767,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(202, b'{"status":"Diagnostic demarre"}')
             else:
                 self.reply(409, b'{"error":"Diagnostic deja en cours"}')
+        elif path == "/api/incidents/update":
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+                result = update_incident(payload)
+                self.reply(200, json.dumps(result, ensure_ascii=False).encode())
+            except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+                self.reply(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode())
+        elif path == "/api/vulnerabilities/refresh":
+            if start_job("vulnerability-refresh", refresh_vulnerabilities):
+                self.reply(202, b'{"status":"Synchronisation CISA demandee"}')
+            else:
+                self.reply(409, b'{"error":"Synchronisation deja en cours"}')
+        elif path == "/api/telegram/test":
+            if not TG_TOKEN or not TG_CHAT:
+                self.reply(400, b'{"error":"Configure TG_TOKEN et TG_CHAT dans les variables du serveur."}')
+            else:
+                warning = telegram("NeuroBouclier Africa : notification de test. Le canal Telegram est opérationnel.")
+                if warning:
+                    self.reply(502, json.dumps({"error": warning}, ensure_ascii=False).encode())
+                else:
+                    self.reply(200, b'{"status":"Notification Telegram envoyee"}')
         else:
             self.reply(404, b'{"error":"Not found"}')
     def log_message(self, *args): pass
