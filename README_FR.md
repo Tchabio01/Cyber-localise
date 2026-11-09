@@ -106,3 +106,16 @@ Les scores sont indicatifs. Ces modules ne remplacent ni un antivirus ni un SOC 
 **Sécurité importante :** le serveur Python écoute uniquement sur `127.0.0.1` et refuse les autres valeurs de `CW_HOST`. Les contrôles d’hôte et d’origine protègent les routes locales contre les requêtes web intersites courantes, mais l’API locale ne valide pas les JWT Supabase et ne protège pas contre un autre programme malveillant déjà exécuté sur l’appareil. Ne modifie pas le code pour publier directement ce serveur sur Internet ; un déploiement public exige une architecture distincte, une authentification côté serveur, HTTPS et une revue de sécurité.
 
 Les observations synchronisées sont des contributions rapportées par un membre et ne sont pas automatiquement certifiées. Leur source et leur date restent visibles.
+
+## NeuroBouclier Africa — premiers modules MVP
+
+La branche `feature/neurobouclier-africa-mvp` ajoute :
+- un centre de suivi des incidents avec états ouvert, en cours et résolu, responsable et note de résolution ;
+- une synchronisation à la demande du catalogue officiel CISA Known Exploited Vulnerabilities (KEV) ;
+- un bouton de test Telegram, sans exposer le jeton dans le navigateur ;
+- la synchronisation cloud des incidents suivis et des vulnérabilités vers Supabase ;
+- une migration SQL additive et des tests unitaires locaux.
+
+Avant d'utiliser le cloud, exécute `supabase/migrations/20261109_neurobouclier_mvp.sql` après le schéma initial. Pour les étapes Windows/Git Bash, la configuration Telegram, les limites et les contrôles, consulte [docs/NEUROBOUCLIER_MVP.md](docs/NEUROBOUCLIER_MVP.md).
+
+La carte africaine et l'investigation IP existaient déjà dans CyberWatch 7.0 et sont conservées. Le catalogue CISA KEV ne permet pas, à lui seul, de conclure qu'un actif particulier est vulnérable : il faudra d'abord inventorier les actifs et leurs versions avec l'autorisation de leur propriétaire.

@@ -37,12 +37,17 @@ async function syncCloud(){
  const box=$('sync-state');box.textContent='Lecture des données locales…';
  const res=await fetch('/api/data',{cache:'no-store'});if(!res.ok)throw Error('API SOC locale indisponible.');
  const d=await res.json();
+ const [incidentRes,vulnerabilityRes]=await Promise.all([fetch('/api/incidents',{cache:'no-store'}),fetch('/api/vulnerabilities',{cache:'no-store'})]);
+ if(!incidentRes.ok||!vulnerabilityRes.ok)throw Error('API incidents ou vulnérabilités indisponible.');
+ const incidents=await incidentRes.json(),localVulnerabilities=await vulnerabilityRes.json();
  const threats=(d.points||[]).map(p=>({organization_id:activeOrg,ip:p.ip,source:p.src,kind:p.kind,label:p.label,country:p.country,country_code:p.cc,city:p.city,lat:p.lat,lon:p.lon,first_seen:p.first_seen,last_seen:p.last_seen,reported_by:user.id,origin:'local_collector'}));
- const events=(d.events||[]).map(e=>({organization_id:activeOrg,local_event_id:String(e.id),ts:e.ts,severity:e.severity,category:e.category,title:e.title,detail:e.detail,ip:e.ip||null,reported_by:user.id}));
- let tCount=0,eCount=0;
+ const events=(incidents||[]).map(e=>({organization_id:activeOrg,local_event_id:String(e.event_id),ts:e.ts,severity:e.severity,category:e.category,title:e.title,detail:e.detail,ip:e.ip||null,status:e.status,assignee:e.assignee||'',resolution:e.resolution||'',reported_by:user.id}));
+ const vulnerabilities=(localVulnerabilities||[]).map(v=>({organization_id:activeOrg,cve:v.cve,vendor:v.vendor,product:v.product,vulnerability_name:v.vulnerability_name,date_added:v.date_added,due_date:v.due_date,ransomware_use:v.ransomware_use,description:v.description,required_action:v.required_action,source_url:v.source_url,reported_by:user.id}));
+ let tCount=0,eCount=0,vCount=0;
  if(threats.length){const {error}=await client.from('cloud_threat_observations').upsert(threats,{onConflict:'organization_id,ip,source,reported_by'});if(error)throw error;tCount=threats.length;}
  if(events.length){const {error}=await client.from('cloud_incident_events').upsert(events,{onConflict:'organization_id,local_event_id,reported_by'});if(error)throw error;eCount=events.length;}
- box.textContent='Synchronisation terminée : '+tCount+' observations et '+eCount+' événements envoyés. Contributions déclarées par un membre, non certifiées automatiquement.';
+ if(vulnerabilities.length){const {error}=await client.from('cloud_vulnerabilities').upsert(vulnerabilities,{onConflict:'organization_id,cve'});if(error)throw error;vCount=vulnerabilities.length;}
+ box.textContent='Synchronisation terminée : '+tCount+' observations, '+eCount+' incidents et '+vCount+' vulnérabilités. Les observations de flux publics restent des indicateurs à examiner.';
  await loadAdmin();
 }
 async function init(){
